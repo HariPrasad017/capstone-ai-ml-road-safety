@@ -1,0 +1,154 @@
+# Part 3 — LLM Integration & Structured Outputs
+## Road Accident Risk Assessment Advisor
+
+## What is this project about?
+
+This part builds a small AI tool that takes in a set of road/accident
+conditions (weather, lighting, alcohol involvement, speed limit, road type)
+and asks a Large Language Model (LLM) to assess how risky those conditions
+are — returning its answer in a strict, predictable JSON format rather than
+free-flowing text. This structured output is what makes the LLM's response
+usable by other software (a website, a dashboard, another program), instead
+of just being readable by a human.
+
+This builds directly on the findings from Part 1 (EDA) — the same real-world
+risk factors (alcohol, lighting, weather) explored there are now used as
+inputs to get an AI-generated risk explanation.
+
+---
+
+## What's inside this folder?
+
+| File | What it contains |
+|---|---|
+| `schema.py` | Defines the exact JSON structure the LLM's response must follow |
+| `llm_structured.py` | Main script — builds the prompt, calls the LLM API, validates the response, retries on failure |
+| `test_api.py` | A minimal script just to confirm the API key and connection work |
+| `.env.example` | Documents which environment variable name is required (no real key inside) |
+| `requirements.txt` | Python packages needed to run this project |
+
+---
+
+## How to run this yourself
+
+1. **Get a free Groq API key**: sign up at [console.groq.com/keys](https://console.groq.com/keys) 
+   (no credit card required) and create an API key.
+
+2. **Set up your environment**:
+   ```
+   python -m venv venv
+   venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+3. **Create your own `.env` file** in this folder (copy `.env.example` and 
+   rename it to `.env`), and paste your key in:
+   ```
+   GROQ_API_KEY=your_actual_key_here
+   ```
+
+4. **Run the main script**:
+   ```
+   python llm_structured.py
+   ```
+   This sends a sample accident scenario to the LLM and prints back a
+   structured JSON risk assessment.
+
+---
+
+## How it works
+
+1. **`build_prompt()`** takes accident conditions (weather, lighting, alcohol
+   involvement, speed, road type) and turns them into a clear instruction for
+   the LLM, explicitly specifying the exact JSON structure it must reply with.
+
+2. **`call_llm()`** sends this prompt to the Groq API (using the
+   `llama-3.1-8b-instant` model) over a standard HTTPS POST request, and
+   returns the raw text response.
+
+3. **`get_risk_assessment()`** takes that raw text and:
+   - Strips away any accidental markdown formatting the model might add
+     (like ` ```json ` code fences)
+   - Parses it as JSON
+   - Validates it against a strict schema (defined in `schema.py` using
+     Pydantic) — checking that `risk_level` is one of Low/Medium/High, that
+     `primary_risk_factors` is a list, and so on
+   - If parsing or validation fails, it **automatically retries up to 3
+     times**, since LLMs occasionally produce malformed or extra text around
+     the JSON
+
+## The JSON schema being enforced
+
+```json
+{
+  "risk_level": "Low" | "Medium" | "High",
+  "primary_risk_factors": ["factor1", "factor2"],
+  "explanation": "one sentence explanation",
+  "safety_recommendation": "one sentence actionable advice"
+}
+```
+
+This is enforced in code using a Pydantic model (`schema.py`), which acts as
+both documentation and a runtime validator — any response that doesn't match
+this shape is rejected and retried rather than silently accepted.
+
+---
+
+## Example output
+
+Input conditions:
+```
+Weather: Rainy, Lighting: Dark, Alcohol: Yes, Speed Limit: 90 km/h, Road: National Highway
+```
+
+Output:
+```json
+{
+  "risk_level": "High",
+  "primary_risk_factors": ["Alcohol Involved", "Rainy Weather", "Dark Lighting"],
+  "explanation": "The combination of alcohol, rain, and darkness increases the risk of accidents on national highways.",
+  "safety_recommendation": "Reduce speed to at least 60 km/h and maintain a safe following distance."
+}
+```
+
+Across multiple test scenarios (clear daylight/no alcohol, foggy dawn, stormy
+dark with alcohol), the model consistently returned valid, well-reasoned
+JSON matching the schema on the first attempt — no retries were needed in
+testing, though the retry mechanism is in place and tested to handle cases
+where it would be.
+
+---
+
+## Design decisions
+
+- **Chose Groq over other LLM providers** for its genuinely free, no-credit-card
+  developer tier, which made it more reliable for this project than some
+  alternatives that require billing setup even for "free tier" access.
+- **Used `temperature=0.3`** (fairly low) to keep responses consistent and
+  reduce the chance of the model adding creative, unstructured text around
+  the JSON.
+- **Retry logic caps at 3 attempts** to avoid infinite loops or excessive API
+  usage if the model consistently fails to produce valid output.
+
+## Known Limitations
+
+- The risk assessments are generated by a general-purpose LLM based on its
+  training knowledge, not a model trained specifically on this project's
+  accident dataset — so its reasoning, while sensible, isn't statistically
+  derived from Part 1/2's data.
+- Free tier rate limits (30 requests/minute) mean this isn't suited for
+  high-volume, production-scale use as-is.
+
+## Additional Testing
+
+To further validate the system's robustness, two additional demonstrations
+were added:
+
+1. **Simulated malformed-output handling**: Deliberately malformed responses
+   (missing fields, extra text, invalid enum values) were fed through the
+   validation pipeline to confirm the retry logic correctly detects and
+   retries on failures, succeeding once a valid response is found.
+
+2. **Batch processing on real data**: The system was run against 5 real
+   accident records from the Part 1/2 dataset, generating risk assessments
+   for actual recorded conditions rather than only hand-crafted test cases.
