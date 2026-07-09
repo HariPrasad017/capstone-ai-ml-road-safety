@@ -1,14 +1,11 @@
-from pydantic import BaseModel
-from typing import List
-from enum import Enum
-
-class RiskLevel(str, Enum):
-    low = "Low"
-    medium = "Medium"
-    high = "High"
-
-class RiskAssessment(BaseModel):
-    risk_level: RiskLevel
-    primary_risk_factors: List[str]
-    explanation: str
-    safety_recommendation: str
+RISK_ASSESSMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk_tier": {"type": "string", "enum": ["low", "medium", "high"]},
+        "flag_for_review": {"type": "boolean"},
+        "primary_signal": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "recommended_action": {"type": "string"}
+    },
+    "required": ["risk_tier", "flag_for_review", "primary_signal", "confidence", "recommended_action"]
+}

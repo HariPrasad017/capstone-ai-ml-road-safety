@@ -1,184 +1,222 @@
-# Part 4 — LLM System with Production Guardrails
-## Road Safety Advisor — End-to-End Application
+# Part 4 — LLM-Powered Feature
+## Track B: Tabular Record Batch Scoring — Road Accident Risk Review
 
-## What is this project about?
+**Chosen Track: (B) Tabular Record Batch Scoring**
 
-This part turns the core LLM logic from Part 3 into a complete, runnable
-application — the **Road Safety Advisor**. A user can describe accident
-conditions (weather, lighting, alcohol involvement, speed, road type)
-through a simple command-line interface, and the system returns an
-AI-generated risk assessment.
+## What is this feature?
 
-The focus of this part isn't just "does it work" but "does it work
-*reliably*" — handling bad input gracefully, recovering from failed API
-calls, respecting rate limits, and keeping a record of what happened. These
-are the concerns that separate a classroom script from a system someone
-could actually depend on.
+Given accident records from the cleaned dataset, this feature calls an LLM
+once per record to score it against a safety-review rubric, returning a
+structured, validated JSON assessment — the kind of output a safety review
+dashboard could consume directly, rather than free-form text a human would
+need to manually interpret.
 
----
+## Files
 
-## What's inside this folder?
-
-| File | What it does |
+| File | Purpose |
 |---|---|
-| `app.py` | Main entry point — runs the interactive command-line application |
-| `validators.py` | Checks and cleans user input before it's sent anywhere |
-| `llm_client.py` | Talks to the Groq LLM API — handles retries, timeouts, rate limiting, and usage tracking |
-| `schema.py` | Defines the exact JSON structure the AI's response must follow |
-| `logger_setup.py` | Sets up logging to both the console and a file |
-| `test_validators.py` | Automated tests confirming the input validation works correctly |
-| `logs/app.log` | Generated automatically when the app runs — a record of every request |
-| `.env.example` | Documents the required environment variable name (no real key inside) |
-| `requirements.txt` | Python packages needed to run this project |
+| `llm_client.py` | `call_llm()` — reusable function to call the Groq API |
+| `guardrails.py` | PII detection guardrail (regex-based) |
+| `prompts.py` | System prompt (rubric + few-shot example) and user prompt builder |
+| `schema.py` | JSON schema for the risk assessment output |
+| `batch_scoring.py` | Main pipeline — runs the 3-record demonstration |
+| `temperature_comparison.py` | Temperature A/B comparison script |
+| `.env.example` | Documents the required environment variable |
+
+## How to run
+
+```
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Create a `.env` file (copy `.env.example`, rename, add your real key):
+```
+GROQ_API_KEY=your_actual_key_here
+```
+
+Run the main pipeline:
+```
+python batch_scoring.py
+```
+
+Run the temperature comparison:
+```
+python temperature_comparison.py
+```
 
 ---
 
-## How to run this yourself
+## 1. `call_llm` Function
 
-1. **Get a free Groq API key** at [console.groq.com/keys](https://console.groq.com/keys)
-   (no credit card required).
+```python
+def call_llm(system_prompt, user_prompt, temperature=0.0, max_tokens=512):
+    payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    response = requests.post(URL, headers=headers, json=payload)
+    if response.status_code != 200:
+        print(f"Error: {response.status_code}")
+        return None
+    return response.json()['choices'][0]['message']['content']
+```
 
-2. **Set up your environment**:
-   ```
-   python -m venv venv
-   venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+**Demonstrated with test prompt:** `call_llm("You are a helpful assistant.", "Reply with only the word: hello")` → returned `"hello"`, confirming the function connects to the API and returns a visible response.
 
-3. **Create your own `.env` file** (copy `.env.example`, rename to `.env`,
-   and paste in your real key):
-   ```
-   GROQ_API_KEY=your_actual_key_here
-   ```
-
-4. **Run the application**:
-   ```
-   python app.py
-   ```
-   Answer the prompts (weather, lighting, alcohol involvement, speed, road
-   type) to get a risk assessment. Type `quit` at any prompt to exit.
-
-5. **Run the automated tests** (optional, confirms validation logic works):
-   ```
-   python test_validators.py
-   ```
-
----
-
-## System scope & user flow
-
-**What this system does:** Takes a description of road/accident conditions
-from a user and returns a structured AI risk assessment (risk level,
-contributing factors, explanation, and a safety recommendation).
-
-**User flow:**
-1. User is prompted for 5 pieces of information about the conditions.
-2. The system validates this input before doing anything else.
-3. If valid, the system calls the LLM (with retries and a timeout built in)
-   and displays the structured result.
-4. If invalid, the system explains what was wrong and asks again — it never
-   crashes on bad input.
-5. This repeats until the user types `quit`, at which point a summary of
-   the session's API usage is shown.
-
-**What this system explicitly does *not* do:** it does not store any
-personal data, does not make automated decisions on anyone's behalf, and
-does not claim to be a substitute for official road safety guidance — it's
-an educational risk-awareness tool.
+The API key is read from the `GROQ_API_KEY` environment variable via
+`python-dotenv` — it is never hardcoded anywhere in the codebase.
 
 ---
 
-## Guardrails implemented (and why each one matters)
+## 2. System Prompt & User Prompt Template (verbatim)
 
-### 1. Input validation & sanitization (`validators.py`)
-Every field is checked against an allowed set of values (e.g. weather must
-be one of Clear/Rainy/Foggy/Stormy/Hazy) or a sensible numeric range (speed
-between 1–200 km/h). Text input is normalized (trimmed, title-cased) before
-checking, so `"rainy "` and `"Rainy"` are both accepted.
+**System prompt:**
+```
+You are a road accident risk assessment system for a safety review team. 
+Given a JSON record describing an accident's conditions, score it against this rubric:
 
-**Why:** Sending unvalidated user input straight to an LLM risks confusing
-or wasted API calls, unpredictable responses, and in worse cases, prompt
-injection. Catching bad input early is cheaper and safer than handling it
-after the fact.
+- risk_tier: "low", "medium", or "high" — based on severity of conditions (alcohol involvement, poor lighting/weather, high speed relative to road type increase risk)
+- flag_for_review: true if risk_tier is "high" OR if alcohol was involved, else false
+- primary_signal: the single most concerning factor in this record (a short phrase)
+- confidence: "low", "medium", or "high" — how confident you are in this assessment given the available fields
+- recommended_action: one concrete, short recommendation for a safety reviewer
 
-### 2. Retries with exponential backoff (`llm_client.py`, via `tenacity`)
-If the LLM returns malformed JSON, or the request fails, the system
-automatically retries up to 3 times, waiting slightly longer between each
-attempt (2s, then 4s, then 8s).
+Respond with ONLY a valid JSON object with exactly these 5 fields, no other text.
 
-**Why:** LLM APIs occasionally return imperfect output or hit transient
-network issues. Failing immediately on the first hiccup would make the
-system unreliable; blind, instant retries could make rate-limiting worse.
-Backoff strikes a balance.
+Example:
+Input: {"Weather Conditions": "Clear", "Lighting Conditions": "Daylight", "Alcohol Involvement": "No", "Speed Limit (km/h)": 40, "Road Type": "Urban Road"}
+Output: {"risk_tier": "low", "flag_for_review": false, "primary_signal": "Favorable conditions across the board", "confidence": "high", "recommended_action": "No immediate action needed; routine monitoring sufficient"}
+```
 
-### 3. Timeouts
-Every API call has a 15-second timeout.
+**User prompt template:**
+```
+Input: {record}
+```
+where `{record}` is a Python dict of the accident's Weather Conditions,
+Lighting Conditions, Alcohol Involvement, Speed Limit, and Road Type.
 
-**Why:** Without this, a slow or hanging API response could freeze the
-whole application indefinitely. A timeout guarantees the system always
-either succeeds or fails within a bounded time.
-
-### 4. Rate limiting
-The client enforces a minimum 2-second gap between consecutive API calls.
-
-**Why:** This respects the API provider's usage limits and avoids the
-system accidentally hammering the API with rapid-fire requests, which could
-get the API key throttled or blocked.
-
-### 5. Logging (`logger_setup.py`)
-Every request, successful response, validation failure, and error is logged
-with a timestamp — both to the console and to `logs/app.log`.
-
-**Why:** If something goes wrong days later, logs are how you find out what
-happened, when, and why — without them, debugging a deployed system is
-largely guesswork.
-
-### 6. Usage tracking
-Each API response includes token usage data, which the system accumulates
-and reports at the end of a session (total requests, total tokens).
-
-**Why:** LLM APIs are usage-billed. In a real deployment, tracking usage is
-essential for cost monitoring and catching runaway usage early.
-
-### 7. Graceful failure handling
-Validation errors, API failures, and unexpected exceptions are all caught
-explicitly — none of them crash the program. The user sees a clear message
-and can simply try again.
-
-**Why:** A production system should never crash outright on a recoverable
-error; it should fail safely and let the user (or operator) recover.
+**Why temperature=0:** structured scoring should be consistent and
+repeatable — a safety review system should return the same assessment for
+the same input every time it runs. Temperature=0 always selects the
+highest-probability next token at each generation step, producing
+deterministic, predictable output suited to this structured data task.
 
 ---
 
-## Testing
+## 3. JSON Schema
 
-`test_validators.py` contains 6 automated test cases covering: valid input,
-an invalid category value, non-numeric input, an out-of-range value, a
-missing required field, and correct normalization of lowercase input. All
-6 tests pass, confirming the validation logic behaves as intended across
-both valid and invalid scenarios.
+```python
+RISK_ASSESSMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "risk_tier": {"type": "string", "enum": ["low", "medium", "high"]},
+        "flag_for_review": {"type": "boolean"},
+        "primary_signal": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "recommended_action": {"type": "string"}
+    },
+    "required": ["risk_tier", "flag_for_review", "primary_signal", "confidence", "recommended_action"]
+}
+```
+
+Every LLM response is parsed with `json.loads()` inside a
+`try/except json.JSONDecodeError` block, then validated against this
+schema using `jsonschema.validate()` inside a
+`try/except jsonschema.ValidationError` block. On any failure, a fallback
+dict (all 5 fields set to `None`) is returned and the error is logged to
+the console.
 
 ---
 
-## Design decisions
+## 4. PII Guardrail
 
-- **Command-line interface, not a web app** — kept the interaction simple
-  and dependency-light, since the focus of this part is the guardrails
-  themselves, not UI complexity.
-- **`tenacity` for retries** instead of a hand-rolled retry loop, since it's
-  a well-tested, widely-used library for exactly this purpose in production
-  Python code.
-- **In-memory rate limiting/usage tracking** — resets each time the program
-  restarts. For a longer-running or multi-user service, this would need to
-  move to persistent storage (e.g. a database or Redis), noted as a
-  limitation below.
+```python
+def has_pii(text):
+    email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
+    phone_pattern = r'\b\d{10}\b|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b'
+    return bool(re.search(email_pattern, text) or re.search(phone_pattern, text))
+```
+
+Run before every `call_llm()` call — if PII is detected, the LLM is never
+called and `"Input blocked: PII detected."` is printed.
+
+**Test results:**
+| Input | PII Detected | Result |
+|---|---|---|
+| "Contact driver at john.doe@email.com for details" | True | Blocked |
+| "Weather was rainy, speed limit 80 km/h" | False | Proceeded to LLM call |
+
+---
+
+## 5. Batch Scoring Demonstration (3 Records)
+
+| Input Record | LLM Assessment JSON | Validation Status |
+|---|---|---|
+| Weather=Hazy, Lighting=Dark, Alcohol=Yes, Speed=61km/h, Road=National Highway | `{"risk_tier": "high", "flag_for_review": true, "primary_signal": "Alcohol involvement and hazardous conditions", "confidence": "medium", "recommended_action": "Conduct thorough investigation and review of safety protocols"}` | PASS |
+| Weather=Hazy, Lighting=Dusk, Alcohol=Yes, Speed=92km/h, Road=Urban Road | `{"risk_tier": "high", "flag_for_review": true, "primary_signal": "Alcohol involvement and high speed", "confidence": "high", "recommended_action": "Review and consider enforcement action"}` | PASS |
+| Weather=Foggy, Lighting=Dawn, Alcohol=No, Speed=120km/h, Road=National Highway | `{"risk_tier": "high", "flag_for_review": true, "primary_signal": "High speed on national highway during poor visibility", "confidence": "medium", "recommended_action": "Review speed management strategies for national highways during low-light conditions"}` | PASS |
+
+All 3 records passed schema validation on the first attempt (no retries
+triggered). All 3 were scored "high" risk — this reflects that the
+sampled rows happen to have genuinely concerning conditions (alcohol
+involvement or poor visibility at high speed), not a bias in the LLM
+toward always predicting "high."
+
+---
+
+## 6. Temperature A/B Comparison (temp=0 vs temp=0.7)
+
+| Input | Output (temp=0) | Output (temp=0.7) | Key Difference |
+|---|---|---|---|
+| Hazy/Dark/Alcohol=Yes/61km/h/Highway | confidence="medium", action="Conduct thorough investigation..." | confidence="high", action="Immediate review and potential intervention necessary" | Same risk_tier/flag; confidence and wording differ, temp=0.7 slightly more urgent tone |
+| Hazy/Dusk/Alcohol=Yes/92km/h/Urban | confidence="high", signal="Alcohol involvement and high speed" | confidence="medium", signal="Alcohol involvement and hazardous driving conditions" | Same risk_tier/flag; confidence flipped, phrasing varies |
+| Foggy/Dawn/Alcohol=No/120km/h/Highway | action="Review speed management strategies for national highways..." | action="Conduct a thorough review of driver behavior and road conditions" | Same risk_tier/flag/confidence; recommended_action wording differs |
+
+**Why temperature=0 is more deterministic:** the model always picks the
+single highest-probability next token at each generation step — given the
+same input, this produces the same (or near-identical) output every time,
+since no randomness is introduced into token selection.
+
+**Why temperature=0.7 introduces variability:** the model samples from a
+broader probability distribution over possible next tokens rather than
+always choosing the top candidate, allowing lower-probability (but still
+reasonable) phrasings to be selected. This produced varied wording and
+occasionally different confidence levels across the 3 test records, even
+though the core risk assessment (`risk_tier`, `flag_for_review`) remained
+stable in every case.
+
+---
+
+## Design Decisions
+
+- **`jsonschema` over `pydantic`**: used per the rubric's explicit
+  specification for this part, providing a lightweight, declarative schema
+  definition separate from Python class-based validation.
+- **Groq API** (`llama-3.1-8b-instant`): free tier, no billing setup
+  required, reused from the same account set up in earlier parts of this
+  project.
+- **One API call per record** in the main pipeline (not a duplicate
+  display call), ensuring the "Raw LLM Response" shown to the user and the
+  validated assessment are always the exact same response.
 
 ## Known Limitations
 
-- Rate limiting and usage tracking are in-memory only — they reset if the
-  program restarts, and wouldn't correctly coordinate limits across multiple
-  simultaneous users if this were deployed as a shared service.
-- The system assumes a single interactive user at a time; it isn't built as
-  a concurrent, multi-user server.
-- Logs are stored locally as plain text; a production deployment would
-  typically ship these to a centralized logging service.
+- The rubric criteria in the system prompt are authored heuristics (e.g.,
+  "alcohol involvement or poor lighting increase risk"), not learned from
+  the dataset — Parts 1–3 established this dataset's recorded outcomes
+  don't actually correlate with these factors, so this feature should be
+  understood as a general-purpose rubric-based reviewer, not a
+  data-validated risk predictor.
+- Tested on a small sample (3 records); broader validation across more
+  records and edge cases (e.g., missing fields) was not performed.
